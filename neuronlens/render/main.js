@@ -111,8 +111,10 @@ function buildLayout() {
   const canvasH = Math.max(maxUnits * unitH + LAYER_PAD_TOP * 2, 300);
   const canvasW = CANVAS_PAD_LEFT + (n - 1) * LAYER_WIDTH + NEURON_R * 2 + CANVAS_PAD_RIGHT;
 
-  canvasEl.width  = canvasW;
-  canvasEl.height = canvasH;
+  // Scale by devicePixelRatio so canvas text/lines are sharp on retina displays
+  const dpr = window.devicePixelRatio || 1;
+  canvasEl.width  = Math.round(canvasW * dpr);
+  canvasEl.height = Math.round(canvasH * dpr);
   canvasEl.style.width  = canvasW + "px";
   canvasEl.style.height = canvasH + "px";
 
@@ -127,7 +129,7 @@ function buildLayout() {
     return { cx, neurons };
   });
 
-  layout = { layers: layoutLayers, canvasW, canvasH };
+  layout = { layers: layoutLayers, canvasW, canvasH, dpr };
 
   const sb = document.getElementById("status-bar");
   if (sb) sb.textContent = layers.map(l =>
@@ -282,7 +284,10 @@ function signalColor(normSig) {
 
 function render() {
   if (!network || !layout) return;
-  ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+  const { canvasW, canvasH, dpr } = layout;
+  // Re-apply DPR transform on every render (resets any stale state)
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, canvasW, canvasH);
 
   const n = network.layers.length;
   const actsA = network.layers.map((_, i) =>
