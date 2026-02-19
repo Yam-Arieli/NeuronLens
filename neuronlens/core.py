@@ -63,6 +63,22 @@ class NeuronLens:
     # Public API
     # ------------------------------------------------------------------
 
+    def show(self, output_dir: str = "./neuronlens_output") -> str:
+        """Generate output and immediately open index.html in the default browser.
+
+        Equivalent to calling :meth:`generate` followed by opening the file.
+
+        Args:
+            output_dir: Directory where index.html and data/ will be written.
+
+        Returns:
+            Absolute path to the output directory.
+        """
+        import webbrowser
+        output_dir = self.generate(output_dir)
+        webbrowser.open(f"file://{os.path.join(output_dir, 'index.html')}")
+        return output_dir
+
     def generate(self, output_dir: str = "./neuronlens_output") -> str:
         """Run the full pipeline and write output files.
 

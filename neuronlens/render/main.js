@@ -106,10 +106,26 @@ function buildLayout() {
   if (!network) return;
   const layers = network.layers;
   const n = layers.length;
-  const unitH = NEURON_R * 2 + NEURON_GAP;
-  const maxUnits = Math.max(...layers.map(l => l.n_display_units));
-  const canvasH = Math.max(maxUnits * unitH + LAYER_PAD_TOP * 2, 300);
-  const canvasW = CANVAS_PAD_LEFT + (n - 1) * LAYER_WIDTH + NEURON_R * 2 + CANVAS_PAD_RIGHT;
+
+  // Fill the entire canvas-container
+  const container = canvasEl.parentElement;
+  const availW = Math.max(container.clientWidth,  400);
+  const availH = Math.max(container.clientHeight, 300);
+
+  // Vertical sizing: compute neuronR so neurons fill available height
+  const PAD_TOP   = Math.round(availH * 0.07);
+  const maxUnits  = Math.max(...layers.map(l => l.n_display_units));
+  const unitH     = (availH - PAD_TOP * 2) / Math.max(maxUnits, 1);
+  const neuronR   = Math.max(Math.floor(unitH * 0.42), 4);
+  const neuronGap = Math.max(unitH - neuronR * 2, 2);
+
+  // Horizontal sizing: spread layers evenly across available width
+  const PAD_SIDE     = Math.round(availW * 0.03);
+  const innerW       = availW - PAD_SIDE * 2 - neuronR * 2;
+  const layerSpacing = n > 1 ? innerW / (n - 1) : 0;
+
+  const canvasW = availW;
+  const canvasH = availH;
 
   // Scale by devicePixelRatio so canvas text/lines are sharp on retina displays
   const dpr = window.devicePixelRatio || 1;
@@ -119,17 +135,20 @@ function buildLayout() {
   canvasEl.style.height = canvasH + "px";
 
   const layoutLayers = layers.map((layer, li) => {
-    const cx = CANVAS_PAD_LEFT + li * LAYER_WIDTH + NEURON_R;
+    const cx = PAD_SIDE + neuronR + li * layerSpacing;
     const nu = layer.n_display_units;
-    const totalH = nu * unitH - NEURON_GAP;
+    const totalH = nu * (neuronR * 2 + neuronGap) - neuronGap;
     const startY = (canvasH - totalH) / 2;
     const neurons = [];
     for (let k = 0; k < nu; k++)
-      neurons.push({ x: cx, y: startY + k * unitH + NEURON_R });
+      neurons.push({ x: cx, y: startY + k * (neuronR * 2 + neuronGap) + neuronR });
     return { cx, neurons };
   });
 
-  layout = { layers: layoutLayers, canvasW, canvasH, dpr };
+  const labelFontSize = Math.max(Math.min(Math.round(neuronR * 0.75), 15), 10);
+  const maxEdgeWidth  = Math.max(neuronR * 0.35, 2);
+
+  layout = { layers: layoutLayers, canvasW, canvasH, dpr, neuronR, maxEdgeWidth, labelFontSize, PAD_TOP };
 
   const sb = document.getElementById("status-bar");
   if (sb) sb.textContent = layers.map(l =>
@@ -311,13 +330,13 @@ function render() {
   for (let l = 0; l < n; l++) drawLayer(l, actsA[l], actsB ? actsB[l] : null, hoverSigNorm);
 
   // Layer labels
-  ctx.font = "11px -apple-system, monospace";
+  ctx.font = `${layout.labelFontSize}px -apple-system, monospace`;
   ctx.textAlign = "center";
   ctx.fillStyle = "#8b949e";
   for (let l = 0; l < n; l++) {
     const lx = layout.layers[l].cx;
-    ctx.fillText(network.layers[l].name, lx, 18);
-    ctx.fillText(`(${network.layers[l].n_neurons})`, lx, 31);
+    ctx.fillText(network.layers[l].name, lx, layout.PAD_TOP * 0.38);
+    ctx.fillText(`(${network.layers[l].n_neurons})`, lx, layout.PAD_TOP * 0.72);
   }
 }
 
@@ -357,8 +376,9 @@ function drawLayer(layerIdx, normsA, normsB, hoverSigNorm) {
       alpha = col.a;
     }
 
+    const r = layout.neuronR;
     ctx.beginPath();
-    ctx.arc(x, y, NEURON_R, 0, Math.PI * 2);
+    ctx.arc(x, y, r, 0, Math.PI * 2);
     ctx.fillStyle = `rgba(${col.r},${col.g},${col.b},${alpha})`;
     ctx.fill();
 
@@ -369,7 +389,7 @@ function drawLayer(layerIdx, normsA, normsB, hoverSigNorm) {
         : (normsA ? normsA[k] : 0);
       if (glowVal > 0.3) {
         ctx.shadowColor = `rgb(${col.r},${col.g},${col.b})`;
-        ctx.shadowBlur = 8 + 8 * glowVal;
+        ctx.shadowBlur = r * 0.4 + r * 0.4 * glowVal;
         ctx.fill();
         ctx.shadowBlur = 0;
       }
@@ -449,7 +469,7 @@ function drawEdges(fromLayerIdx, actsA, actsB, hoverSigNorm) {
       ctx.moveTo(x1, y1);
       ctx.lineTo(x2, y2);
       ctx.strokeStyle = `rgba(${col.r},${col.g},${col.b},${alpha})`;
-      ctx.lineWidth = normW * MAX_EDGE_WIDTH;
+      ctx.lineWidth = normW * layout.maxEdgeWidth;
       ctx.stroke();
     }
   }
@@ -467,7 +487,7 @@ function onMouseMove(e) {
     for (let k = 0; k < layout.layers[l].neurons.length; k++) {
       const { x, y } = layout.layers[l].neurons[k];
       const dx = mx - x, dy = my - y;
-      if (dx * dx + dy * dy <= (NEURON_R + 3) ** 2) {
+      if (dx * dx + dy * dy <= (layout.neuronR + 3) ** 2) {
         found = { layerIdx: l, neuronIdx: k };
         break outer;
       }

@@ -12,32 +12,17 @@ import os
 import sys
 import json
 
-import numpy as np
-import pandas as pd
-import torch
 import torch.nn as nn
 
 # Make the package importable from the repo root without installing it
 sys.path.insert(0, os.path.dirname(__file__))
 from neuronlens import NeuronLens
-
-
-def make_synthetic_data(n_samples=200, n_features=10, seed=42):
-    rng = np.random.default_rng(seed)
-    X = rng.standard_normal((n_samples, n_features)).astype(np.float32)
-    # Two classes: 0 and 1
-    labels = (X[:, 0] + X[:, 1] > 0).astype(int)
-    ages = rng.integers(20, 60, size=n_samples)
-    metadata = pd.DataFrame({
-        "label": labels,
-        "label_str": ["cat" if l == 1 else "dog" for l in labels],
-        "age": ages,
-    })
-    return X, metadata
+from neuronlens.filters import eq, gt, and_
+from neuronlens.utils import make_synthetic_data
 
 
 def make_model(n_features=10):
-    model = nn.Sequential(
+    return nn.Sequential(
         nn.Linear(n_features, 16),
         nn.ReLU(),
         nn.Linear(16, 12),
@@ -46,20 +31,19 @@ def make_model(n_features=10):
         nn.ReLU(),
         nn.Linear(8, 2),
     )
-    # Use random weights (untrained) — that's fine for visualisation testing
-    return model
 
 
 def main():
     print("=== NeuronLens end-to-end test ===\n")
 
-    X, metadata = make_synthetic_data()
-    model = make_model()
+    X, metadata = make_synthetic_data(n_samples=200, n_features=10)
+    model = make_model(n_features=10)
 
     precomputed_filters = [
-        {"column": "label_str", "op": "eq", "value": "cat"},
-        {"column": "label_str", "op": "eq", "value": "dog"},
-        {"column": "age", "op": "gt", "value": 40},
+        eq("label_str", "cat"),
+        eq("label_str", "dog"),
+        gt("age", 40),
+        and_(eq("label_str", "cat"), gt("age", 40)),
     ]
 
     viz = NeuronLens(
@@ -104,7 +88,6 @@ def main():
             act = json.load(f)
         groups = act["groups"]
         assert "default" in groups, "activations.json missing 'default' group"
-        # Each filter should produce one entry
         assert len(groups) == 1 + len(precomputed_filters), (
             f"Expected {1 + len(precomputed_filters)} groups, got {len(groups)}"
         )
