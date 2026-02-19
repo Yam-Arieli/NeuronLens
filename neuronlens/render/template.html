@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NeuronLens — Neural Network Visualizer</title>
+<style>
+/* {{STYLE}} */
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="toolbar">
+    <h1>NeuronLens</h1>
+
+    <!-- Mode toggles -->
+    <button class="btn active" id="btn-single">Single filter</button>
+    <button class="btn" id="btn-compare">Compare</button>
+
+    <!-- Filter A -->
+    <div class="filter-group" id="single-row">
+      <span class="color-dot" style="background:#58a6ff"></span>
+      <label>Filter:</label>
+      <select id="filter-a"></select>
+    </div>
+
+    <!-- Filter B (compare mode only) -->
+    <div class="filter-group" id="compare-row" style="display:none">
+      <span class="color-dot" style="background:#ff6464"></span>
+      <label>Compare:</label>
+      <select id="filter-b"></select>
+    </div>
+
+    <span id="status-bar"></span>
+  </div>
+
+  <div id="canvas-container">
+    <canvas id="main-canvas"></canvas>
+  </div>
+
+  <div id="legend">
+    <span>Brightness ∝ activation magnitude</span>
+    <span>·</span>
+    <span>Edge thickness ∝ |weight|</span>
+    <span>·</span>
+    <span>Hover neuron to isolate edges</span>
+  </div>
+</div>
+
+<div id="tooltip"></div>
+
+<script>
+const __NETWORK__ = // {{NETWORK_DATA}}
+;
+const __ACTIVATIONS__ = // {{ACTIVATIONS_DATA}}
+;
+// {{SCRIPT}}
+</script>
+</body>
+</html>
