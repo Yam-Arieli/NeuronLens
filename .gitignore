@@ -14,3 +14,4 @@ env/
 # Claude artifacts
 .claude/
 test_output/
+CLAUDE.md
