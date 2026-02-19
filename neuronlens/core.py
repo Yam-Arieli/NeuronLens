@@ -27,6 +27,10 @@ class NeuronLens:
             Default 10.
         precomputed_filters: List of filter spec dicts to precompute
             activation subsets for.  See activations.py for the spec format.
+        record_pre_activation: If True, also records post-linear
+            (pre-norm/activation) values per block.  Stored in
+            activations.json under ``pre_activation_groups`` for future
+            dead-neuron analysis.  Default False.
     """
 
     def __init__(
@@ -38,11 +42,13 @@ class NeuronLens:
         max_display_units: int = 200,
         n_reorder_passes: int = 10,
         precomputed_filters: Optional[List[Dict[str, Any]]] = None,
+        record_pre_activation: bool = False,
     ):
         self.metadata = metadata
         self.max_display_units = max_display_units
         self.n_reorder_passes = n_reorder_passes
         self.precomputed_filters = precomputed_filters or []
+        self.record_pre_activation = record_pre_activation
 
         # Resolve adapter
         if isinstance(model, ModelAdapter):
@@ -50,7 +56,9 @@ class NeuronLens:
         else:
             # Try PyTorch
             try:
-                self.adapter = PyTorchAdapter(model)
+                self.adapter = PyTorchAdapter(
+                    model, record_pre_activation=record_pre_activation
+                )
             except Exception as exc:
                 raise TypeError(
                     "model must be a ModelAdapter or a PyTorch nn.Module "
@@ -101,7 +109,15 @@ class NeuronLens:
         # perms[l] and edges[l] align correctly (reorder_neurons_fast returns
         # one permutation per "node" in the graph, including the input).
         layer_activations = [self.dataset] + hidden_activations
-        layer_info = [("input", "input")] + self.adapter.get_layers()
+
+        # Layer info dicts — input is a special synthetic entry
+        input_info: Dict[str, Any] = {
+            "name":        "input",
+            "type":        "input",
+            "block_label": "Input",
+            "block_type":  "input",
+        }
+        layer_info = [input_info] + self.adapter.get_layers()
         layer_sizes = [a.shape[1] for a in layer_activations]
 
         print(f"[NeuronLens] Reordering neurons ({self.n_reorder_passes} passes)…")
@@ -112,6 +128,17 @@ class NeuronLens:
             layer_activations, self.metadata, self.precomputed_filters
         )
 
+        # Optionally gather pre-activation (post-linear, pre-norm/activation) stats
+        pre_activations_by_group = None
+        if self.record_pre_activation and hasattr(self.adapter, "get_pre_activations"):
+            print("[NeuronLens] Precomputing pre-activation statistics…")
+            pre_acts = self.adapter.get_pre_activations()
+            # pre_acts[i] → displayed layer i+1 (layer 0 is input, no pre-activation)
+            pre_layer_activations = [None] + list(pre_acts)
+            pre_activations_by_group = precompute_activations(
+                pre_layer_activations, self.metadata, self.precomputed_filters
+            )
+
         print("[NeuronLens] Building network data…")
         network_data = build_network_json(
             layer_info,
@@ -121,7 +148,9 @@ class NeuronLens:
             max_display_units=self.max_display_units,
         )
         activations_data = build_activations_json(
-            activations_by_group, self.precomputed_filters
+            activations_by_group,
+            self.precomputed_filters,
+            pre_activations_by_group=pre_activations_by_group,
         )
 
         print("[NeuronLens] Rendering HTML…")

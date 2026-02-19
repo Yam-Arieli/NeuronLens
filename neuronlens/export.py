@@ -25,18 +25,20 @@ def _to_json_safe(obj):
 
 
 def build_network_json(
-    layer_info: List[tuple],          # [(name, type), ...]
+    layer_info: List[Dict[str, Any]],  # list of dicts from adapter.get_layers()
     layer_sizes: List[int],
     perms: List[np.ndarray],
-    weights: List[np.ndarray],        # (n_in, n_out) original indexing
+    weights: List[np.ndarray],          # (n_in, n_out) original indexing
     max_display_units: int = 200,
 ) -> Dict[str, Any]:
     """Build the network.json data structure.
 
     Args:
-        layer_info: list of (name, layer_type) per layer.
+        layer_info: list of info dicts, one per layer (including synthetic
+            input entry).  Each dict must have ``name``, ``type``,
+            ``block_label``, and ``block_type``.
         layer_sizes: number of neurons per layer.
-        perms: permutation arrays (reordered_pos -> original_idx) per layer.
+        perms: permutation arrays (display_pos -> original_idx) per layer.
         weights: weight matrices between adjacent layers, original indexing.
         max_display_units: threshold for aggregated rendering.
 
@@ -44,35 +46,41 @@ def build_network_json(
         dict ready for JSON serialisation.
     """
     layers_out = []
-    for l, (name, ltype) in enumerate(layer_info):
+    for l, info in enumerate(layer_info):
+        name        = info["name"]
+        ltype       = info.get("type", "linear")
+        block_label = info.get("block_label", name)
+        block_type  = info.get("block_type", "linear")
+
         n = layer_sizes[l]
-        aggregated = n > max_display_units
+        aggregated  = n > max_display_units
         bucket_size = int(np.ceil(n / max_display_units)) if aggregated else 1
-        n_display = int(np.ceil(n / bucket_size))
+        n_display   = int(np.ceil(n / bucket_size))
         layers_out.append({
-            "name": name,
-            "type": ltype,
-            "n_neurons": n,
-            "aggregated": aggregated,
-            "bucket_size": bucket_size,
+            "name":           name,
+            "type":           ltype,
+            "block_label":    block_label,
+            "block_type":     block_type,
+            "n_neurons":      n,
+            "aggregated":     aggregated,
+            "bucket_size":    bucket_size,
             "n_display_units": n_display,
-            "perm": perms[l].tolist(),  # perm[display_pos] = original_idx
+            "perm":           perms[l].tolist(),  # perm[display_pos] = original_idx
         })
 
-    # Edges: store as sparse list for each layer transition
-    # edges[l] is between layer l and layer l+1
-    # We store the reordered weight matrix (rows = perm[l], cols = perm[l+1])
-    # but clipped to a manageable number of edges
+    # Edges: store as weight matrix for each layer transition, in display order.
+    # edges[l][display_i][display_j] = weight from display unit i (layer l)
+    #                                  to display unit j (layer l+1)
     edges_out = []
     for l, W in enumerate(weights):
-        perm_in = perms[l]
+        perm_in  = perms[l]
         perm_out = perms[l + 1]
         W_reordered = W[np.ix_(perm_in, perm_out)]  # (n_in, n_out)
         edges_out.append(W_reordered.tolist())
 
     return {
         "layers": layers_out,
-        "edges": edges_out,
+        "edges":  edges_out,
         "max_display_units": max_display_units,
     }
 
@@ -80,8 +88,16 @@ def build_network_json(
 def build_activations_json(
     activations_by_group: Dict[str, Any],
     filter_metadata: Optional[List[Dict[str, Any]]] = None,
+    pre_activations_by_group: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Build the activations.json data structure."""
+    """Build the activations.json data structure.
+
+    Args:
+        activations_by_group: post-activation stats keyed by group name.
+        filter_metadata: list of filter specs (for building filter_index).
+        pre_activations_by_group: optional post-linear (pre-norm/activation)
+            stats, present only when record_pre_activation=True.
+    """
     from .activations import filter_key
 
     filter_index = {}
@@ -90,10 +106,14 @@ def build_activations_json(
             k = filter_key(fspec)
             filter_index[k] = fspec
 
-    return {
-        "groups": activations_by_group,
+    result: Dict[str, Any] = {
+        "groups":       activations_by_group,
         "filter_index": filter_index,
     }
+    if pre_activations_by_group is not None:
+        result["pre_activation_groups"] = pre_activations_by_group
+
+    return result
 
 
 def write_output(

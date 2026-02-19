@@ -7,46 +7,49 @@
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const NEURON_R = 7;
-const NEURON_GAP = 4;
-const LAYER_WIDTH = 120;
-const LAYER_PAD_TOP = 60;
-const CANVAS_PAD_LEFT = 60;
-const CANVAS_PAD_RIGHT = 60;
 const MAX_EDGE_ALPHA = 0.55;
-const MAX_EDGE_WIDTH = 3.5;
-const DIM_ALPHA = 0.07;
+const DIM_ALPHA      = 0.2;   // softened dim for non-hovered neurons
 
-const COLOR_A = { r: 88,  g: 166, b: 255 };  // #58a6ff  (blue)
-const COLOR_B = { r: 255, g: 100, b: 100 };  // #ff6464  (red)
-// Downstream hover signal colour (warm amber)
-const COLOR_SIG = { r: 255, g: 200, b: 80 };
+const COLOR_A   = { r: 88,  g: 166, b: 255 };  // #58a6ff  (blue)
+const COLOR_B   = { r: 255, g: 100, b: 100 };  // #ff6464  (red)
+const COLOR_SIG = { r: 255, g: 200, b: 80  };  // warm amber (hover signal)
+
+const FADE_IN_MS  = 100;   // ms to blend into hover state
+const FADE_OUT_MS = 300;   // ms to blend back to normal
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
-let network    = null;
+let network     = null;
 let activations = null;
 let canvasEl, ctx;
-let hoveredNeuron = null;  // { layerIdx, neuronIdx }  — display-unit indices
-let mode = "single";       // "single" | "compare"
+let mode         = "single";   // "single" | "compare"
 let filterGroupA = "default";
 let filterGroupB = "default";
-let layout = null;
+let layout       = null;
+
+// Hover animation state — replaces the old hoveredNeuron boolean
+const hoverState = {
+  neuron:    null,   // { layerIdx, neuronIdx } — persists during fade-out
+  alpha:     0,      // current blend [0 = normal, 1 = full hover]
+  target:    0,      // animation target (0 or 1)
+  animFrom:  0,      // alpha when current animation started
+  animStart: null,   // DOMHighResTimeStamp when animation started
+  rafId:     null,   // requestAnimationFrame handle
+};
 
 // ── Boot ─────────────────────────────────────────────────────────────────────
 
 window.addEventListener("DOMContentLoaded", () => {
-  canvasEl = document.getElementById("main-canvas");
-  ctx = canvasEl.getContext("2d");
-
-  network    = __NETWORK__;
+  canvasEl    = document.getElementById("main-canvas");
+  ctx         = canvasEl.getContext("2d");
+  network     = __NETWORK__;
   activations = __ACTIVATIONS__;
 
   buildUI();
   buildLayout();
   render();
 
-  canvasEl.addEventListener("mousemove", onMouseMove);
+  canvasEl.addEventListener("mousemove",  onMouseMove);
   canvasEl.addEventListener("mouseleave", onMouseLeave);
   window.addEventListener("resize", () => { buildLayout(); render(); });
 });
@@ -54,7 +57,7 @@ window.addEventListener("DOMContentLoaded", () => {
 // ── UI ────────────────────────────────────────────────────────────────────────
 
 function buildUI() {
-  const groups = Object.keys(activations.groups);
+  const groups      = Object.keys(activations.groups);
   const filterIndex = activations.filter_index || {};
 
   function specToLabel(spec) {
@@ -67,7 +70,6 @@ function buildUI() {
     const spec = filterIndex[key];
     return spec ? specToLabel(spec) : key;
   }
-
   function populateSelect(id, onChange) {
     const sel = document.getElementById(id);
     groups.forEach(g => {
@@ -81,7 +83,7 @@ function buildUI() {
 
   populateSelect("filter-a", v => { filterGroupA = v; });
   const selB = populateSelect("filter-b", v => { filterGroupB = v; });
-  selB.value = groups[Math.min(1, groups.length - 1)];
+  selB.value   = groups[Math.min(1, groups.length - 1)];
   filterGroupB = selB.value;
 
   document.getElementById("btn-single").addEventListener("click", () => {
@@ -105,50 +107,78 @@ function buildUI() {
 function buildLayout() {
   if (!network) return;
   const layers = network.layers;
-  const n = layers.length;
+  const n      = layers.length;
 
-  // Fill the entire canvas-container
   const container = canvasEl.parentElement;
-  const availW = Math.max(container.clientWidth,  400);
-  const availH = Math.max(container.clientHeight, 300);
+  const availW    = Math.max(container.clientWidth,  400);
+  const availH    = Math.max(container.clientHeight, 300);
 
-  // Vertical sizing: compute neuronR so neurons fill available height
-  const PAD_TOP   = Math.round(availH * 0.07);
-  const maxUnits  = Math.max(...layers.map(l => l.n_display_units));
-  const unitH     = (availH - PAD_TOP * 2) / Math.max(maxUnits, 1);
-  const neuronR   = Math.max(Math.floor(unitH * 0.42), 4);
-  const neuronGap = Math.max(unitH - neuronR * 2, 2);
+  const maxUnits = Math.max(...layers.map(l => l.n_display_units));
 
-  // Horizontal sizing: spread layers evenly across available width
+  // ── Label area ──────────────────────────────────────────────────────────
+  const labelFontSize = Math.max(Math.min(Math.round(availH * 0.018), 15), 10);
+  const labelAreaH    = Math.ceil(labelFontSize * 2.8);  // room for 2 text lines
+
+  // ── Block vertical padding ───────────────────────────────────────────────
+  const blockPadV = Math.max(Math.round(availH * 0.03), 4);
+
+  // ── Neuron sizing: fill 88 % of canvas height minus label + padding ──────
+  const neuronSpaceH = availH * 0.88 - labelAreaH - 2 * blockPadV;
+  const unitH        = neuronSpaceH / Math.max(maxUnits, 1);
+  const neuronR      = Math.max(Math.floor(unitH * 0.42), 4);
+  const neuronGap    = Math.max(unitH - neuronR * 2, 2);
+
+  // ── Total content height for the tallest column ──────────────────────────
+  const maxNeuronColH = maxUnits * (neuronR * 2 + neuronGap) - neuronGap;
+  const totalContentH = labelAreaH + blockPadV + maxNeuronColH + blockPadV;
+
+  // ── Vertical centering: shift so content sits in the middle ──────────────
+  const topOffset  = Math.max((availH - totalContentH) / 2, 4);
+
+  // ── Derived y coordinates (stored in layout for draw functions) ──────────
+  const labelY1    = topOffset + labelFontSize * 1.0;
+  const labelY2    = topOffset + labelFontSize * 2.2;
+  const blockTopY  = topOffset + labelAreaH;
+  const blockBotY  = blockTopY + blockPadV + maxNeuronColH + blockPadV;
+  const neuronTopY = blockTopY + blockPadV;
+
+  // ── Horizontal layout: spread layers evenly ──────────────────────────────
   const PAD_SIDE     = Math.round(availW * 0.03);
   const innerW       = availW - PAD_SIDE * 2 - neuronR * 2;
   const layerSpacing = n > 1 ? innerW / (n - 1) : 0;
 
-  const canvasW = availW;
-  const canvasH = availH;
-
-  // Scale by devicePixelRatio so canvas text/lines are sharp on retina displays
-  const dpr = window.devicePixelRatio || 1;
-  canvasEl.width  = Math.round(canvasW * dpr);
-  canvasEl.height = Math.round(canvasH * dpr);
-  canvasEl.style.width  = canvasW + "px";
-  canvasEl.style.height = canvasH + "px";
-
+  // ── Per-layer positions ──────────────────────────────────────────────────
   const layoutLayers = layers.map((layer, li) => {
-    const cx = PAD_SIDE + neuronR + li * layerSpacing;
-    const nu = layer.n_display_units;
-    const totalH = nu * (neuronR * 2 + neuronGap) - neuronGap;
-    const startY = (canvasH - totalH) / 2;
-    const neurons = [];
+    const cx        = PAD_SIDE + neuronR + li * layerSpacing;
+    const nu        = layer.n_display_units;
+    const layerColH = nu * (neuronR * 2 + neuronGap) - neuronGap;
+    // Shorter columns are centered vertically within the max-height area
+    const startY    = neuronTopY + (maxNeuronColH - layerColH) / 2;
+    const neurons   = [];
     for (let k = 0; k < nu; k++)
       neurons.push({ x: cx, y: startY + k * (neuronR * 2 + neuronGap) + neuronR });
     return { cx, neurons };
   });
 
-  const labelFontSize = Math.max(Math.min(Math.round(neuronR * 0.75), 15), 10);
-  const maxEdgeWidth  = Math.max(neuronR * 0.35, 2);
+  const maxEdgeWidth = Math.max(neuronR * 0.35, 2);
+  const blockPadH    = Math.max(neuronR * 0.7,  4);
+  const canvasW      = availW;
+  const canvasH      = availH;
 
-  layout = { layers: layoutLayers, canvasW, canvasH, dpr, neuronR, maxEdgeWidth, labelFontSize, PAD_TOP };
+  // Scale by devicePixelRatio so text/lines are sharp on retina displays
+  const dpr = window.devicePixelRatio || 1;
+  canvasEl.width        = Math.round(canvasW * dpr);
+  canvasEl.height       = Math.round(canvasH * dpr);
+  canvasEl.style.width  = canvasW + "px";
+  canvasEl.style.height = canvasH + "px";
+
+  layout = {
+    layers: layoutLayers,
+    canvasW, canvasH, dpr,
+    neuronR, maxEdgeWidth, labelFontSize,
+    labelY1, labelY2,
+    blockTopY, blockBotY, blockPadH,
+  };
 
   const sb = document.getElementById("status-bar");
   if (sb) sb.textContent = layers.map(l =>
@@ -163,22 +193,21 @@ function getActivations(groupKey, layerIdx) {
   return grp ? (grp[String(layerIdx)] || null) : null;
 }
 
-// Returns activations in DISPLAY ORDER (i.e. display unit k → its activation).
+// Returns activations in DISPLAY ORDER (display unit k → its activation).
 // raw[] is stored in original-neuron order; perm[display_pos] = original_idx.
 function getDisplayActivations(groupKey, layerIdx) {
-  const raw = getActivations(groupKey, layerIdx);
+  const raw   = getActivations(groupKey, layerIdx);
   if (!raw) return null;
   const layer = network.layers[layerIdx];
   const perm  = layer.perm;
 
   if (!layer.aggregated) {
-    // Reorder: display position k shows original neuron perm[k]
     return perm.map(origIdx => raw[origIdx] || 0);
   }
 
-  // Aggregated: average bucket of original neurons
-  const bs = layer.bucket_size;
-  const nu = layer.n_display_units;
+  // Aggregated: average over bucket of original neurons
+  const bs      = layer.bucket_size;
+  const nu      = layer.n_display_units;
   const display = new Array(nu).fill(0);
   for (let k = 0; k < nu; k++) {
     let sum = 0, cnt = 0;
@@ -201,17 +230,16 @@ function normalizeArray(arr) {
 
 // ── Edge weight lookup ────────────────────────────────────────────────────────
 
-// edges[fromLayerIdx] is stored in display order:
-//   edges[l][display_i][display_j] = weight from display unit i (layer l)
-//                                    to display unit j (layer l+1)
+// edges[l][display_i][display_j] = weight from display unit i (layer l)
+//                                  to display unit j (layer l+1)
 // For aggregated layers, average over the bucket of underlying neurons.
 function getBucketWeight(fromLayerIdx, i_disp, j_disp) {
-  const edges = network.edges[fromLayerIdx];
+  const edges   = network.edges[fromLayerIdx];
   if (!edges) return 0;
   const fromLayer = network.layers[fromLayerIdx];
   const toLayer   = network.layers[fromLayerIdx + 1];
-  const bs_in  = fromLayer.bucket_size;
-  const bs_out = toLayer.bucket_size;
+  const bs_in     = fromLayer.bucket_size;
+  const bs_out    = toLayer.bucket_size;
 
   let sum = 0, cnt = 0;
   for (let bi = 0; bi < bs_in; bi++) {
@@ -230,22 +258,16 @@ function getBucketWeight(fromLayerIdx, i_disp, j_disp) {
 
 // ── Hover signal propagation ──────────────────────────────────────────────────
 
-// Propagate activation forward from the hovered neuron.
-// Returns an array of length n_layers:
-//   signal[l]  = null for layers before hoveredLayer
-//   signal[hoveredLayer] = sparse array with only neuronIdx non-zero
-//   signal[l > hoveredLayer] = propagated values for all display units
 function computeHoverSignal(layerIdx, neuronIdx) {
-  const n = network.layers.length;
+  const n      = network.layers.length;
   const signal = new Array(n).fill(null);
 
-  // Seed: hovered neuron's actual (raw, un-normalised) activation
+  // Seed with the hovered neuron's actual activation
   const rawActs = getDisplayActivations(filterGroupA, layerIdx) || [];
   const seedVal = rawActs[neuronIdx] || 0;
-
   const seedLayer = new Array(network.layers[layerIdx].n_display_units).fill(0);
   seedLayer[neuronIdx] = seedVal;
-  signal[layerIdx] = seedLayer;
+  signal[layerIdx]     = seedLayer;
 
   // Forward pass
   for (let l = layerIdx; l < n - 1; l++) {
@@ -255,13 +277,11 @@ function computeHoverSignal(layerIdx, neuronIdx) {
     for (let i = 0; i < n_in; i++) {
       const src = signal[l][i];
       if (!src || src < 1e-15) continue;
-      for (let j = 0; j < n_out; j++) {
+      for (let j = 0; j < n_out; j++)
         next[j] += getBucketWeight(l, i, j) * src;
-      }
     }
     signal[l + 1] = next;
   }
-
   return signal;
 }
 
@@ -299,16 +319,93 @@ function signalColor(normSig) {
   };
 }
 
+// Linear interpolation between two colour objects
+function lerpColor(a, b, t) {
+  if (t <= 0) return a;
+  if (t >= 1) return b;
+  return {
+    r: Math.round(a.r + (b.r - a.r) * t),
+    g: Math.round(a.g + (b.g - a.g) * t),
+    b: Math.round(a.b + (b.b - a.b) * t),
+    a: a.a + (b.a - a.a) * t,
+  };
+}
+
+// ── Block backgrounds ─────────────────────────────────────────────────────────
+
+function roundedRect(x, y, w, h, r) {
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+function drawBlockBackgrounds() {
+  const n      = network.layers.length;
+  const r      = layout.neuronR;
+  const padH   = layout.blockPadH;
+  const corner = Math.max(r * 0.5, 6);
+
+  for (let l = 0; l < n; l++) {
+    if (layout.layers[l].neurons.length === 0) continue;
+    const cx = layout.layers[l].cx;
+    const x  = cx - r - padH;
+    const w  = (r + padH) * 2;
+
+    ctx.beginPath();
+    roundedRect(x, layout.blockTopY, w, layout.blockBotY - layout.blockTopY, corner);
+    ctx.fillStyle   = "rgba(255,255,255,0.025)";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,0.07)";
+    ctx.lineWidth   = 1;
+    ctx.stroke();
+  }
+}
+
+// ── Hover animation ───────────────────────────────────────────────────────────
+
+function startHoverAnim(target) {
+  if (hoverState.rafId) cancelAnimationFrame(hoverState.rafId);
+  hoverState.target    = target;
+  hoverState.animFrom  = hoverState.alpha;
+  hoverState.animStart = null;
+  hoverState.rafId     = requestAnimationFrame(animStep);
+}
+
+function animStep(ts) {
+  if (hoverState.animStart === null) hoverState.animStart = ts;
+  const elapsed = ts - hoverState.animStart;
+  const dur     = hoverState.target === 1 ? FADE_IN_MS : FADE_OUT_MS;
+  const t       = Math.min(elapsed / dur, 1);
+  hoverState.alpha = hoverState.animFrom + (hoverState.target - hoverState.animFrom) * t;
+  render();
+  if (t < 1) {
+    hoverState.rafId = requestAnimationFrame(animStep);
+  } else {
+    hoverState.rafId = null;
+    if (hoverState.target === 0) hoverState.neuron = null;  // fully faded out
+  }
+}
+
 // ── Rendering ─────────────────────────────────────────────────────────────────
 
 function render() {
   if (!network || !layout) return;
   const { canvasW, canvasH, dpr } = layout;
-  // Re-apply DPR transform on every render (resets any stale state)
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, canvasW, canvasH);
 
-  const n = network.layers.length;
+  const n     = network.layers.length;
+  const ha    = hoverState.alpha;   // 0 = normal, 1 = full hover
+  const hovL  = hoverState.neuron ? hoverState.neuron.layerIdx  : -1;
+  const hovK  = hoverState.neuron ? hoverState.neuron.neuronIdx : -1;
+
   const actsA = network.layers.map((_, i) =>
     normalizeArray(getDisplayActivations(filterGroupA, i))
   );
@@ -316,67 +413,65 @@ function render() {
     ? network.layers.map((_, i) => normalizeArray(getDisplayActivations(filterGroupB, i)))
     : null;
 
-  // Compute hover signal (normalised per layer) when a neuron is hovered
+  // Precompute hover signal when any hover effect is visible
   let hoverSigNorm = null;
-  if (hoveredNeuron) {
-    const raw = computeHoverSignal(hoveredNeuron.layerIdx, hoveredNeuron.neuronIdx);
+  if (hoverState.neuron && ha > 0) {
+    const raw = computeHoverSignal(hovL, hovK);
     hoverSigNorm = raw.map(s => s ? normalizeArray(s) : null);
   }
 
-  // Edges first (drawn behind neurons)
-  for (let l = 0; l < n - 1; l++) drawEdges(l, actsA, actsB, hoverSigNorm);
+  // Draw order: backgrounds → edges → neurons → labels
+  drawBlockBackgrounds();
+  for (let l = 0; l < n - 1; l++) drawEdges(l, actsA, actsB, hoverSigNorm, hovL, hovK, ha);
+  for (let l = 0; l < n;     l++) drawLayer(l, actsA[l], actsB ? actsB[l] : null, hoverSigNorm, hovL, hovK, ha);
 
-  // Neurons on top
-  for (let l = 0; l < n; l++) drawLayer(l, actsA[l], actsB ? actsB[l] : null, hoverSigNorm);
-
-  // Layer labels
-  ctx.font = `${layout.labelFontSize}px -apple-system, monospace`;
+  ctx.font      = `${layout.labelFontSize}px -apple-system, monospace`;
   ctx.textAlign = "center";
   ctx.fillStyle = "#8b949e";
   for (let l = 0; l < n; l++) {
-    const lx = layout.layers[l].cx;
-    ctx.fillText(network.layers[l].name, lx, layout.PAD_TOP * 0.38);
-    ctx.fillText(`(${network.layers[l].n_neurons})`, lx, layout.PAD_TOP * 0.72);
+    const lx    = layout.layers[l].cx;
+    const label = network.layers[l].block_label || network.layers[l].name;
+    ctx.fillText(label,                              lx, layout.labelY1);
+    ctx.fillText(`(${network.layers[l].n_neurons})`, lx, layout.labelY2);
   }
 }
 
-function drawLayer(layerIdx, normsA, normsB, hoverSigNorm) {
+function drawLayer(layerIdx, normsA, normsB, hoverSigNorm, hovL, hovK, ha) {
   const layerLayout = layout.layers[layerIdx];
-  const nu = layerLayout.neurons.length;
-  const hovL = hoveredNeuron ? hoveredNeuron.layerIdx : -1;
-  const hovK = hoveredNeuron ? hoveredNeuron.neuronIdx : -1;
+  const nu          = layerLayout.neurons.length;
+  const r           = layout.neuronR;
 
   for (let k = 0; k < nu; k++) {
     const { x, y } = layerLayout.neurons[k];
-    let col, alpha, isHovered = false;
 
-    if (hoverSigNorm) {
+    // ── Compute base (normal) colour ────────────────────────────────────────
+    const normCol = neuronColor(normsA ? normsA[k] : 0, normsB ? normsB[k] : null);
+
+    // ── Compute hover colour for this neuron ────────────────────────────────
+    let hoverCol  = normCol;
+    let isHovered = false;
+
+    if (hoverSigNorm && ha > 0) {
       if (layerIdx < hovL) {
-        // Pre-hover layers: dim everything
-        col = neuronColor(0, null);
-        alpha = DIM_ALPHA;
+        hoverCol = { ...normCol, a: DIM_ALPHA };
       } else if (layerIdx === hovL) {
         if (k === hovK) {
-          // The hovered neuron itself: normal colour + highlight border
-          col = neuronColor(normsA ? normsA[k] : 0, normsB ? normsB[k] : null);
-          alpha = col.a;
+          hoverCol  = normCol;   // hovered neuron stays at normal colour
           isHovered = true;
         } else {
-          col = neuronColor(0, null);
-          alpha = DIM_ALPHA;
+          hoverCol = { ...normCol, a: DIM_ALPHA };
         }
       } else {
-        // Downstream layers: colour by propagated signal
+        // Downstream: colour by propagated signal
         const sig = hoverSigNorm[layerIdx] ? (hoverSigNorm[layerIdx][k] || 0) : 0;
-        col = signalColor(sig);
-        alpha = col.a;
+        hoverCol  = signalColor(sig);
       }
-    } else {
-      col = neuronColor(normsA ? normsA[k] : 0, normsB ? normsB[k] : null);
-      alpha = col.a;
     }
 
-    const r = layout.neuronR;
+    // ── Blend normal → hover by ha ──────────────────────────────────────────
+    const col   = lerpColor(normCol, hoverCol, ha);
+    const alpha = col.a;
+
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
     ctx.fillStyle = `rgba(${col.r},${col.g},${col.b},${alpha})`;
@@ -384,40 +479,37 @@ function drawLayer(layerIdx, normsA, normsB, hoverSigNorm) {
 
     // Glow
     if (alpha > 0.4) {
-      const glowVal = hoverSigNorm && layerIdx > hovL
+      const glowVal = (hoverSigNorm && layerIdx > hovL)
         ? (hoverSigNorm[layerIdx] ? (hoverSigNorm[layerIdx][k] || 0) : 0)
         : (normsA ? normsA[k] : 0);
       if (glowVal > 0.3) {
         ctx.shadowColor = `rgb(${col.r},${col.g},${col.b})`;
-        ctx.shadowBlur = r * 0.4 + r * 0.4 * glowVal;
+        ctx.shadowBlur  = r * 0.4 + r * 0.4 * glowVal;
         ctx.fill();
-        ctx.shadowBlur = 0;
+        ctx.shadowBlur  = 0;
       }
     }
 
     // Border
-    ctx.strokeStyle = isHovered
-      ? `rgba(255,255,255,0.95)`
+    ctx.strokeStyle = (isHovered && ha > 0.5)
+      ? `rgba(255,255,255,${0.6 + ha * 0.35})`
       : `rgba(${col.r},${col.g},${col.b},${Math.min(alpha + 0.2, 1)})`;
-    ctx.lineWidth = isHovered ? 2 : 1;
+    ctx.lineWidth   = (isHovered && ha > 0.5) ? 2 : 1;
     ctx.stroke();
   }
 }
 
-function drawEdges(fromLayerIdx, actsA, actsB, hoverSigNorm) {
+function drawEdges(fromLayerIdx, actsA, actsB, hoverSigNorm, hovL, hovK, ha) {
   const toLayerIdx = fromLayerIdx + 1;
-  const edges = network.edges[fromLayerIdx];
+  const edges      = network.edges[fromLayerIdx];
   if (!edges) return;
 
   const fromLayer = network.layers[fromLayerIdx];
   const toLayer   = network.layers[toLayerIdx];
-  const n_in  = fromLayer.n_display_units;
-  const n_out = toLayer.n_display_units;
+  const n_in      = fromLayer.n_display_units;
+  const n_out     = toLayer.n_display_units;
 
-  const hovL = hoveredNeuron ? hoveredNeuron.layerIdx : -1;
-  const hovK = hoveredNeuron ? hoveredNeuron.neuronIdx : -1;
-
-  // Pre-compute max weight for this layer pair (normalises thickness/alpha)
+  // Pre-compute max weight for normalisation
   let maxW = 0;
   for (let i = 0; i < n_in; i++)
     for (let j = 0; j < n_out; j++)
@@ -433,35 +525,41 @@ function drawEdges(fromLayerIdx, actsA, actsB, hoverSigNorm) {
       const normW = w / maxW;
       if (normW < 0.01) continue;
 
-      let alpha, col;
+      // ── Normal state ──────────────────────────────────────────────────────
+      const srcA      = actsA[fromLayerIdx] ? actsA[fromLayerIdx][i] : 0;
+      const srcB      = actsB && actsB[fromLayerIdx] ? actsB[fromLayerIdx][i] : null;
+      const normAlpha = normW * MAX_EDGE_ALPHA;
+      const normCol   = neuronColor(srcA, srcB);
 
-      if (!hoverSigNorm) {
-        // ── Normal (no hover) ──────────────────────────────────────────────
-        alpha = normW * MAX_EDGE_ALPHA;
-        const srcA = actsA[fromLayerIdx] ? actsA[fromLayerIdx][i] : 0;
-        const srcB = actsB && actsB[fromLayerIdx] ? actsB[fromLayerIdx][i] : null;
-        col = neuronColor(srcA, srcB);
+      // ── Hover state ───────────────────────────────────────────────────────
+      let hoverAlpha = normAlpha;
+      let hoverCol   = normCol;
 
-      } else if (fromLayerIdx < hovL) {
-        // ── Before hovered layer: dim ──────────────────────────────────────
-        alpha = normW * MAX_EDGE_ALPHA * DIM_ALPHA;
-        col = neuronColor(0, null);
+      if (hoverSigNorm && ha > 0) {
+        if (fromLayerIdx < hovL) {
+          // Before hovered layer: dim
+          hoverAlpha = normW * MAX_EDGE_ALPHA * DIM_ALPHA;
+          hoverCol   = neuronColor(0, null);
 
-      } else if (fromLayerIdx === hovL) {
-        // ── From hovered layer: only show edges from the hovered neuron ────
-        if (i !== hovK) continue;
-        alpha = normW * MAX_EDGE_ALPHA;
-        const srcA = actsA[fromLayerIdx] ? actsA[fromLayerIdx][hovK] : 0;
-        col = neuronColor(srcA, null);
+        } else if (fromLayerIdx === hovL) {
+          // From hovered layer: only the hovered neuron's edges remain
+          hoverAlpha = (i === hovK) ? normAlpha : 0;
+          if (i === hovK) {
+            hoverCol = neuronColor(actsA[fromLayerIdx] ? actsA[fromLayerIdx][hovK] : 0, null);
+          }
 
-      } else {
-        // ── Downstream layers: scale by propagated signal ──────────────────
-        const sigNorm = hoverSigNorm[fromLayerIdx];
-        const sigVal  = sigNorm ? (sigNorm[i] || 0) : 0;
-        if (sigVal < 0.01) continue;
-        alpha = normW * sigVal * MAX_EDGE_ALPHA;
-        col = signalColor(sigVal);
+        } else {
+          // Downstream: scale by propagated signal
+          const sigNorm = hoverSigNorm[fromLayerIdx];
+          const sigVal  = sigNorm ? (sigNorm[i] || 0) : 0;
+          hoverAlpha    = normW * sigVal * MAX_EDGE_ALPHA;
+          hoverCol      = signalColor(sigVal);
+        }
       }
+
+      // ── Blend normal → hover ──────────────────────────────────────────────
+      const alpha = normAlpha + (hoverAlpha - normAlpha) * ha;
+      const col   = lerpColor(normCol, hoverCol, ha);
 
       if (alpha < 0.005) continue;
 
@@ -469,7 +567,7 @@ function drawEdges(fromLayerIdx, actsA, actsB, hoverSigNorm) {
       ctx.moveTo(x1, y1);
       ctx.lineTo(x2, y2);
       ctx.strokeStyle = `rgba(${col.r},${col.g},${col.b},${alpha})`;
-      ctx.lineWidth = normW * layout.maxEdgeWidth;
+      ctx.lineWidth   = normW * layout.maxEdgeWidth;
       ctx.stroke();
     }
   }
@@ -479,8 +577,8 @@ function drawEdges(fromLayerIdx, actsA, actsB, hoverSigNorm) {
 
 function onMouseMove(e) {
   const rect = canvasEl.getBoundingClientRect();
-  const mx = e.clientX - rect.left;
-  const my = e.clientY - rect.top;
+  const mx   = e.clientX - rect.left;
+  const my   = e.clientY - rect.top;
 
   let found = null;
   outer: for (let l = 0; l < layout.layers.length; l++) {
@@ -494,23 +592,27 @@ function onMouseMove(e) {
     }
   }
 
-  if (found && hoveredNeuron &&
-      found.layerIdx === hoveredNeuron.layerIdx &&
-      found.neuronIdx === hoveredNeuron.neuronIdx) {
+  // Same neuron as already shown — just nudge the tooltip
+  if (found && hoverState.neuron &&
+      found.layerIdx  === hoverState.neuron.layerIdx &&
+      found.neuronIdx === hoverState.neuron.neuronIdx) {
     updateTooltip(e.clientX, e.clientY, found);
     return;
   }
 
-  hoveredNeuron = found;
-  render();
-  if (found) updateTooltip(e.clientX, e.clientY, found);
-  else hideTooltip();
+  if (found) {
+    hoverState.neuron = found;
+    startHoverAnim(1);
+    updateTooltip(e.clientX, e.clientY, found);
+  } else {
+    startHoverAnim(0);
+    hideTooltip();
+  }
 }
 
 function onMouseLeave() {
-  hoveredNeuron = null;
   hideTooltip();
-  render();
+  startHoverAnim(0);
 }
 
 function updateTooltip(cx, cy, { layerIdx, neuronIdx }) {
@@ -522,7 +624,7 @@ function updateTooltip(cx, cy, { layerIdx, neuronIdx }) {
     ? ((getDisplayActivations(filterGroupB, layerIdx) || [])[neuronIdx] || 0)
     : null;
 
-  let html = `<div class="tt-title">${layer.name} — unit ${neuronIdx}</div>`;
+  let html = `<div class="tt-title">${layer.block_label || layer.name} — unit ${neuronIdx}</div>`;
   if (layer.aggregated) {
     const s = neuronIdx * layer.bucket_size;
     const e = Math.min(s + layer.bucket_size - 1, layer.n_neurons - 1);
@@ -536,7 +638,7 @@ function updateTooltip(cx, cy, { layerIdx, neuronIdx }) {
       <span class="tt-val">${nB.toFixed(4)}</span></div>`;
   }
 
-  tt.innerHTML = html;
+  tt.innerHTML     = html;
   tt.style.display = "block";
   const pad = 12;
   let tx = cx + pad, ty = cy + pad;

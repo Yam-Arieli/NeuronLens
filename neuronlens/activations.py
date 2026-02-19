@@ -80,6 +80,8 @@ def compute_mean_abs_activations(
     """
     result: Dict[int, List[float]] = {}
     for l, acts in enumerate(layer_activations):
+        if acts is None:
+            continue  # e.g. input slot in pre-activation groups
         if mask is not None:
             acts = acts[mask]
         if len(acts) == 0:
