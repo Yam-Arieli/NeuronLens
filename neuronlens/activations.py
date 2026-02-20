@@ -68,7 +68,7 @@ def _apply_filter(metadata: pd.DataFrame, filter_spec: Dict[str, Any]) -> np.nda
 def compute_mean_abs_activations(
     layer_activations: List[np.ndarray],
     mask: Optional[np.ndarray] = None,
-) -> Dict[int, List[float]]:
+) -> Dict[int, Any]:
     """Compute per-neuron mean absolute activations for one filter group.
 
     Args:
@@ -78,16 +78,23 @@ def compute_mean_abs_activations(
     Returns:
         Dict mapping layer_idx -> list of mean-abs values (one per neuron).
     """
-    result: Dict[int, List[float]] = {}
+    result: Dict[int, Any] = {}
     for l, acts in enumerate(layer_activations):
         if acts is None:
             continue  # e.g. input slot in pre-activation groups
         if mask is not None:
             acts = acts[mask]
         if len(acts) == 0:
-            result[l] = [0.0] * acts.shape[1]
+            mean_act = np.zeros(acts.shape[1:])
         else:
-            result[l] = np.mean(np.abs(acts), axis=0).tolist()
+            # axis=0 reduces over samples; for 4-D (N,C,H,W) this gives (C,H,W)
+            mean_act = np.mean(np.abs(acts), axis=0)
+        # For conv/image layers (C,H,W): average over channels → (H,W) → flat
+        # list of H*W scalars (row-major).  n_display_units = H*W.
+        # Linear layers (1-D) are unaffected.
+        if mean_act.ndim == 3:
+            mean_act = mean_act.mean(axis=0).flatten()  # (C,H,W) → (H*W,)
+        result[l] = mean_act.tolist()
     return result
 
 

@@ -11,6 +11,12 @@ env/
 # macOS
 .DS_Store
 
+# cifar
+examples/cifar10_example.py
+examples/cifar10_data/
+examples/cifar10_output/
+
+
 # Claude artifacts
 .claude/
 test_output/

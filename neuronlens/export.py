@@ -24,6 +24,11 @@ def _to_json_safe(obj):
     return obj
 
 
+def _is_matrix_layer(info: Dict[str, Any]) -> bool:
+    """True for layers rendered as 2D spatial matrices (conv/input with spatial dims)."""
+    return info.get("type") in ("conv", "input") and "spatial_h" in info
+
+
 def build_network_json(
     layer_info: List[Dict[str, Any]],  # list of dicts from adapter.get_layers()
     layer_sizes: List[int],
@@ -53,30 +58,79 @@ def build_network_json(
         block_type  = info.get("block_type", "linear")
 
         n = layer_sizes[l]
-        aggregated  = n > max_display_units
-        bucket_size = int(np.ceil(n / max_display_units)) if aggregated else 1
-        n_display   = int(np.ceil(n / bucket_size))
-        layers_out.append({
-            "name":           name,
-            "type":           ltype,
-            "block_label":    block_label,
-            "block_type":     block_type,
-            "n_neurons":      n,
-            "aggregated":     aggregated,
-            "bucket_size":    bucket_size,
-            "n_display_units": n_display,
-            "perm":           perms[l].tolist(),  # perm[display_pos] = original_idx
-        })
 
-    # Edges: store as weight matrix for each layer transition, in display order.
+        if _is_matrix_layer(info):
+            # Conv/image layers: rendered as a 2D grid of H*W cells.
+            # n_display_units = H*W (one display unit per spatial cell).
+            # Spatial positions are never reordered.
+            n_cells     = info["spatial_h"] * info["spatial_w"]
+            aggregated  = False
+            bucket_size = 1
+            n_display   = n_cells
+            entry_perm  = list(range(n_cells))
+        else:
+            aggregated  = n > max_display_units
+            bucket_size = int(np.ceil(n / max_display_units)) if aggregated else 1
+            n_display   = int(np.ceil(n / bucket_size))
+            entry_perm  = perms[l].tolist()
+
+        entry = {
+            "name":            name,
+            "type":            ltype,
+            "block_label":     block_label,
+            "block_type":      block_type,
+            "n_neurons":       n,
+            "aggregated":      aggregated,
+            "bucket_size":     bucket_size,
+            "n_display_units": n_display,
+            "perm":            entry_perm,
+        }
+        # Conv/image layers include spatial dimensions for heatmap rendering
+        if "channels" in info:
+            entry["channels"]  = info["channels"]
+        if "spatial_h" in info:
+            entry["spatial_h"] = info["spatial_h"]
+        if "spatial_w" in info:
+            entry["spatial_w"] = info["spatial_w"]
+        layers_out.append(entry)
+
+    # Edges: weight matrix for each layer transition, in display order.
     # edges[l][display_i][display_j] = weight from display unit i (layer l)
-    #                                  to display unit j (layer l+1)
+    #                                  to display unit j (layer l+1).
+    #
+    # No lines are ever drawn to/from conv layers, but we STORE Conv→Linear
+    # weights so that hover signal can propagate from conv cells to linear
+    # neurons.  Conv→Conv and Input→Conv are set to null (no propagation).
     edges_out = []
     for l, W in enumerate(weights):
-        perm_in  = perms[l]
-        perm_out = perms[l + 1]
-        W_reordered = W[np.ix_(perm_in, perm_out)]  # (n_in, n_out)
-        edges_out.append(W_reordered.tolist())
+        from_matrix = _is_matrix_layer(layer_info[l])
+        to_matrix   = _is_matrix_layer(layer_info[l + 1])
+
+        if from_matrix and to_matrix:
+            # Conv→Conv / Input→Conv: no edges, no propagation
+            edges_out.append(None)
+        elif from_matrix and not to_matrix:
+            # Conv→Linear: store per-cell weights for hover propagation.
+            # perm_in is identity (spatial positions never reordered).
+            # Guard: if W.shape[0] ≠ n_cells (e.g. MaxPool between conv hook and
+            # linear input changes spatial dims), skip edge storage rather than crash.
+            n_cells  = layer_info[l]["spatial_h"] * layer_info[l]["spatial_w"]
+            if W.shape[0] != n_cells:
+                edges_out.append(None)
+            else:
+                perm_in  = np.arange(n_cells)
+                perm_out = perms[l + 1]
+                W_reordered = W[np.ix_(perm_in, perm_out)]
+                edges_out.append(W_reordered.tolist())
+        elif not from_matrix and to_matrix:
+            # Linear→Conv (unusual): no edges
+            edges_out.append(None)
+        else:
+            # Linear→Linear: store as before
+            perm_in     = perms[l]
+            perm_out    = perms[l + 1]
+            W_reordered = W[np.ix_(perm_in, perm_out)]
+            edges_out.append(W_reordered.tolist())
 
     return {
         "layers": layers_out,

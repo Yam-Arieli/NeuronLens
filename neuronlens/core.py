@@ -10,7 +10,7 @@ from .adapters.base import ModelAdapter
 from .adapters.pytorch import PyTorchAdapter
 from .activations import precompute_activations
 from .export import build_network_json, build_activations_json, write_output
-from .reorder import reorder_neurons_fast
+from .reorder import reorder_neurons_fast, reorder_neurons_by_class
 
 
 class NeuronLens:
@@ -31,6 +31,12 @@ class NeuronLens:
             (pre-norm/activation) values per block.  Stored in
             activations.json under ``pre_activation_groups`` for future
             dead-neuron analysis.  Default False.
+        reorder_by: Optional metadata column name.  When set, neurons are
+            sorted by class-preference (center-of-mass over per-class mean
+            activations) instead of the default crossing-score minimization.
+            Classes are sorted alphabetically; neurons preferring the first
+            class appear at the top of each layer.  Default None (use
+            crossing-score reordering).
     """
 
     def __init__(
@@ -43,12 +49,14 @@ class NeuronLens:
         n_reorder_passes: int = 10,
         precomputed_filters: Optional[List[Dict[str, Any]]] = None,
         record_pre_activation: bool = False,
+        reorder_by: Optional[str] = None,
     ):
         self.metadata = metadata
         self.max_display_units = max_display_units
         self.n_reorder_passes = n_reorder_passes
         self.precomputed_filters = precomputed_filters or []
         self.record_pre_activation = record_pre_activation
+        self.reorder_by = reorder_by
 
         # Resolve adapter
         if isinstance(model, ModelAdapter):
@@ -117,11 +125,34 @@ class NeuronLens:
             "block_label": "Input",
             "block_type":  "input",
         }
+        # For image/conv inputs expose the spatial dimensions
+        if self.dataset.ndim == 4:
+            _, C, H, W = self.dataset.shape
+            input_info["channels"]  = C
+            input_info["spatial_h"] = H
+            input_info["spatial_w"] = W
         layer_info = [input_info] + self.adapter.get_layers()
         layer_sizes = [a.shape[1] for a in layer_activations]
 
-        print(f"[NeuronLens] Reordering neurons ({self.n_reorder_passes} passes)…")
-        perms = reorder_neurons_fast(weights, n_passes=self.n_reorder_passes)
+        print(f"[NeuronLens] Reordering neurons…")
+        def _is_spatial(info: Dict[str, Any]) -> bool:
+            return info.get("type") in ("conv", "input") and "spatial_h" in info
+
+        if self.reorder_by is not None:
+            print(f"  using class-based ordering on column '{self.reorder_by}'")
+            perms = reorder_neurons_by_class(
+                layer_activations, self.metadata, self.reorder_by, layer_info
+            )
+        else:
+            print(f"  using crossing-score minimization ({self.n_reorder_passes} passes)")
+            # Pass None for conv-involving connections so the reorder algorithm
+            # only optimises linear↔linear crossings (conv spatial positions are fixed).
+            weights_for_reorder = [
+                None if (_is_spatial(layer_info[i]) or _is_spatial(layer_info[i + 1]))
+                else w
+                for i, w in enumerate(weights)
+            ]
+            perms = reorder_neurons_fast(weights_for_reorder, n_passes=self.n_reorder_passes)
 
         print("[NeuronLens] Precomputing activation statistics…")
         activations_by_group = precompute_activations(
